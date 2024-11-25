@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Cloudformation Script for basic VPC with public Subnet and a S3 Bucket with Policy to acces from Ec2 and a EC2 Instance with running Python ImageViewer Application
+
+Resources: 
+  ImageViewerVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+  ImageViewerPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ImageViewerVPC
+      CidrBlock: 10.0.0.10/28
+
+  ImageViewerIGW:
+    Type: AWS::EC2::InternetGateway
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ImageViewerVPC
+      InternetGatewayId: !Ref ImageViewerIGW
+
+  ImageViewerRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ImageViewerVPC
+
+  ImageViewerRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref ImageViewerRT
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ImageViewerIGW
+
+  routeTableAssocName:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ImageViewerPublicSubnet
+      RouteTableId: !Ref ImageViewerRT
+
+  ImageViewerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: ImageViewerSG
+      GroupDescription: Security group for Image Viewer app
+      VpcId: !Ref ImageViewerVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0  
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'image-viewer-buckets-${AWS::AccountId}'
+    DeletionPolicy: Retain
+
+  ImageViewerIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - 
+         PolicyName: S3-Read-Write-Access
+         PolicyDocument:
+           Version: "2012-10-17"
+           Statement:
+              - Effect: Allow
+                Action: 
+                  - s3:ListBucket
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: 
+                  - !GetAtt S3Bucket.Arn
+                  - !Sub '${S3Bucket.Arn}/*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ImageViewerIAMRole
+  ImageViewerEC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0b76e450112e1918c
+      InstanceType: t2.micro
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: "0"
+          SubnetId: !Ref ImageViewerPublicSubnet
+          GroupSet:
+            - !Ref ImageViewerSG
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData: 
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            apt-get update -y
+            apt-get upgrade -y
+            apt-get install -y python3-pip git curl unzip python3.12-venv
+            cd /var
+            sudo curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            sudo unzip awscliv2.zip
+            sudo ./aws/install
+            git clone https://github.com/marcolindner/image-viewer app
+            cd app
+            python3 -m venv venv
+            source venv/bin/activate
+            sudo chmod +x main.py
+            pip3 install -r requirements.txt --break-system-packages --no-warn-script-location
+            export S3_BUCKET_NAME="${S3Bucket}"
+            cd /home/ubuntu
+            echo "S3_BUCKET_NAME=$S3_BUCKET_NAME" >> .bashrc
+            source .bashrc
+            cd /var/app
+            aws s3 cp /var/app/images/ s3://$S3_BUCKET_NAME/ --recursive``````
+            nohup uvicorn main:app --host 0.0.0.0 --port 8000 &
+
+Outputs: 
+  WebAppURL:
+    Description: Adresse der Webanwendung
+    Value: !Sub 'http://${ImageViewerEC2.PublicDnsName}'
+
+  S3BucketName: 
+    Description: Name des erstellten S3-Buckets
+    Value: !Ref S3Bucket
+    
